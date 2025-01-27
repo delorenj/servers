@@ -17,4 +17,7 @@ if (!COLLECTION_NAME) {
   process.exit(1);
 }
 
-export { OPENAI_API_KEY, QDRANT_URL, COLLECTION_NAME };
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
+// Note: QDRANT_API_KEY is optional, so we don't check if it exists
+
+export { OPENAI_API_KEY, QDRANT_URL, COLLECTION_NAME, QDRANT_API_KEY };

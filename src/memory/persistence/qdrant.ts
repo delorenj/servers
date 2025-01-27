@@ -1,7 +1,7 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import OpenAI from 'openai';
 import { Entity, Relation } from '../types.js';
-import { QDRANT_URL, COLLECTION_NAME, OPENAI_API_KEY } from '../config.js';
+import { QDRANT_URL, COLLECTION_NAME, OPENAI_API_KEY, QDRANT_API_KEY } from '../config.js';
 
 interface EntityPayload extends Entity {
   type: 'entity';
@@ -35,7 +35,19 @@ export class QdrantPersistence {
   private openai: OpenAI;
 
   constructor() {
-    this.client = new QdrantClient({ url: QDRANT_URL });
+    // Validate QDRANT_URL format and protocol
+    if (!QDRANT_URL.startsWith('http://') && !QDRANT_URL.startsWith('https://')) {
+      throw new Error('QDRANT_URL must start with http:// or https://');
+    }
+
+    const isHttps = QDRANT_URL.startsWith('https://');
+    
+    this.client = new QdrantClient({ 
+      url: QDRANT_URL,
+      timeout: 10000, // 10 second timeout
+      apiKey: QDRANT_API_KEY // Optional API key for authentication
+    });
+
     this.openai = new OpenAI({
       apiKey: OPENAI_API_KEY,
     });
