@@ -19,6 +19,7 @@
     "link-all": "npm link --workspaces"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.0.1",
     "@modelcontextprotocol/server-everything": "*",
     "@modelcontextprotocol/server-gdrive": "*",
     "@modelcontextprotocol/server-postgres": "*",
@@ -29,5 +30,10 @@
     "@modelcontextprotocol/server-filesystem": "*",
     "@modelcontextprotocol/server-everart": "*",
     "@modelcontextprotocol/server-sequential-thinking": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "shx": "^0.3.4",
+    "typescript": "^5.6.2"
   }
 }

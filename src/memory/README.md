@@ -1,203 +1,144 @@
-# Knowledge Graph Memory Server
-A basic implementation of persistent memory using a local knowledge graph. This lets Claude remember information about the user across chats.
+# MCP Memory Server with Qdrant Persistence
 
-## Core Concepts
+This MCP server provides a knowledge graph implementation with semantic search capabilities powered by Qdrant vector database.
 
-### Entities
-Entities are the primary nodes in the knowledge graph. Each entity has:
-- A unique name (identifier)
-- An entity type (e.g., "person", "organization", "event")
-- A list of observations
+## Features
 
-Example:
-```json
-{
-  "name": "John_Smith",
-  "entityType": "person",
-  "observations": ["Speaks fluent Spanish"]
-}
+- Graph-based knowledge representation with entities and relations
+- File-based persistence (memory.json)
+- Semantic search using Qdrant vector database
+- OpenAI embeddings for semantic similarity
+
+## Environment Variables
+
+The following environment variables are required:
+
+```bash
+# OpenAI API key for generating embeddings
+OPENAI_API_KEY=your-openai-api-key
+
+# Qdrant server URL
+QDRANT_URL=http://your-qdrant-server:6333
+
+# Name of the Qdrant collection to use
+QDRANT_COLLECTION_NAME=your-collection-name
 ```
 
-### Relations
-Relations define directed connections between entities. They are always stored in active voice and describe how entities interact or relate to each other.
+## Setup
 
-Example:
-```json
-{
-  "from": "John_Smith",
-  "to": "Anthropic",
-  "relationType": "works_at"
-}
-```
-### Observations
-Observations are discrete pieces of information about an entity. They are:
-
-- Stored as strings
-- Attached to specific entities
-- Can be added or removed independently
-- Should be atomic (one fact per observation)
-
-Example:
-```json
-{
-  "entityName": "John_Smith",
-  "observations": [
-    "Speaks fluent Spanish",
-    "Graduated in 2019",
-    "Prefers morning meetings"
-  ]
-}
+1. Install dependencies:
+```bash
+npm install
 ```
 
-## API
+2. Build the server:
+```bash
+npm run build
+```
 
-### Tools
-- **create_entities**
-  - Create multiple new entities in the knowledge graph
-  - Input: `entities` (array of objects)
-    - Each object contains:
-      - `name` (string): Entity identifier
-      - `entityType` (string): Type classification
-      - `observations` (string[]): Associated observations
-  - Ignores entities with existing names
-
-- **create_relations**
-  - Create multiple new relations between entities
-  - Input: `relations` (array of objects)
-    - Each object contains:
-      - `from` (string): Source entity name
-      - `to` (string): Target entity name
-      - `relationType` (string): Relationship type in active voice
-  - Skips duplicate relations
-
-- **add_observations**
-  - Add new observations to existing entities
-  - Input: `observations` (array of objects)
-    - Each object contains:
-      - `entityName` (string): Target entity
-      - `contents` (string[]): New observations to add
-  - Returns added observations per entity
-  - Fails if entity doesn't exist
-
-- **delete_entities**
-  - Remove entities and their relations
-  - Input: `entityNames` (string[])
-  - Cascading deletion of associated relations
-  - Silent operation if entity doesn't exist
-
-- **delete_observations**
-  - Remove specific observations from entities
-  - Input: `deletions` (array of objects)
-    - Each object contains:
-      - `entityName` (string): Target entity
-      - `observations` (string[]): Observations to remove
-  - Silent operation if observation doesn't exist
-
-- **delete_relations**
-  - Remove specific relations from the graph
-  - Input: `relations` (array of objects)
-    - Each object contains:
-      - `from` (string): Source entity name
-      - `to` (string): Target entity name
-      - `relationType` (string): Relationship type
-  - Silent operation if relation doesn't exist
-
-- **read_graph**
-  - Read the entire knowledge graph
-  - No input required
-  - Returns complete graph structure with all entities and relations
-
-- **search_nodes**
-  - Search for nodes based on query
-  - Input: `query` (string)
-  - Searches across:
-    - Entity names
-    - Entity types
-    - Observation content
-  - Returns matching entities and their relations
-
-- **open_nodes**
-  - Retrieve specific nodes by name
-  - Input: `names` (string[])
-  - Returns:
-    - Requested entities
-    - Relations between requested entities
-  - Silently skips non-existent nodes
-
-# Usage with Claude Desktop
-
-### Setup
-
-Add this to your claude_desktop_config.json:
-
-#### Docker
-
+3. Add to MCP settings:
 ```json
 {
   "mcpServers": {
     "memory": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "mcp/memory"]
-    }
-  }
-}
-```
-
-#### NPX
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-memory"
+      "command": "/bin/zsh",
+      "args": ["-c", "cd /path/to/server && node dist/index.js"],
+      "env": {
+        "OPENAI_API_KEY": "your-openai-api-key",
+        "QDRANT_URL": "http://your-qdrant-server:6333",
+        "QDRANT_COLLECTION_NAME": "your-collection-name"
+      },
+      "alwaysAllow": [
+        "create_entities",
+        "create_relations",
+        "add_observations",
+        "delete_entities",
+        "delete_observations",
+        "delete_relations",
+        "read_graph",
+        "search_similar"
       ]
     }
   }
 }
 ```
 
-### System Prompt
+## Tools
 
-The prompt for utilizing memory depends on the use case. Changing the prompt will help the model determine the frequency and types of memories created.
+### Entity Management
+- `create_entities`: Create multiple new entities
+- `create_relations`: Create relations between entities
+- `add_observations`: Add observations to entities
+- `delete_entities`: Delete entities and their relations
+- `delete_observations`: Delete specific observations
+- `delete_relations`: Delete specific relations
+- `read_graph`: Get the full knowledge graph
 
-Here is an example prompt for chat personalization. You could use this prompt in the "Custom Instructions" field of a [Claude.ai Project](https://www.anthropic.com/news/projects). 
+### Semantic Search
+- `search_similar`: Search for semantically similar entities and relations
+  ```typescript
+  interface SearchParams {
+    query: string;     // Search query text
+    limit?: number;    // Max results (default: 10)
+  }
+  ```
 
+## Implementation Details
+
+The server maintains two forms of persistence:
+
+1. File-based (memory.json):
+   - Complete knowledge graph structure
+   - Fast access to full graph
+   - Used for graph operations
+
+2. Qdrant Vector DB:
+   - Semantic embeddings of entities and relations
+   - Enables similarity search
+   - Automatically synchronized with file storage
+
+### Synchronization
+
+When entities or relations are modified:
+1. Changes are written to memory.json
+2. Embeddings are generated using OpenAI
+3. Vectors are stored in Qdrant
+4. Both storage systems remain consistent
+
+### Search Process
+
+When searching:
+1. Query text is converted to embedding
+2. Qdrant performs similarity search
+3. Results include both entities and relations
+4. Results are ranked by semantic similarity
+
+## Example Usage
+
+```typescript
+// Create entities
+await client.callTool("create_entities", {
+  entities: [{
+    name: "Project",
+    entityType: "Task",
+    observations: ["A new development project"]
+  }]
+});
+
+// Search similar concepts
+const results = await client.callTool("search_similar", {
+  query: "development tasks",
+  limit: 5
+});
 ```
-Follow these steps for each interaction:
 
-1. User Identification:
-   - You should assume that you are interacting with default_user
-   - If you have not identified default_user, proactively try to do so.
+## Contributing
 
-2. Memory Retrieval:
-   - Always begin your chat by saying only "Remembering..." and retrieve all relevant information from your knowledge graph
-   - Always refer to your knowledge graph as your "memory"
-
-3. Memory
-   - While conversing with the user, be attentive to any new information that falls into these categories:
-     a) Basic Identity (age, gender, location, job title, education level, etc.)
-     b) Behaviors (interests, habits, etc.)
-     c) Preferences (communication style, preferred language, etc.)
-     d) Goals (goals, targets, aspirations, etc.)
-     e) Relationships (personal and professional relationships up to 3 degrees of separation)
-
-4. Memory Update:
-   - If any new information was gathered during the interaction, update your memory as follows:
-     a) Create entities for recurring organizations, people, and significant events
-     b) Connect them to the current entities using relations
-     b) Store facts about them as observations
-```
-
-## Building
-
-Docker:
-
-```sh
-docker build -t mcp/memory -f src/memory/Dockerfile . 
-```
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
 ## License
 
-This MCP server is licensed under the MIT License. This means you are free to use, modify, and distribute the software, subject to the terms and conditions of the MIT License. For more details, please see the LICENSE file in the project repository.
+MIT

@@ -1,414 +1,436 @@
 #!/usr/bin/env node
-
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { QdrantPersistence } from './persistence/qdrant.js';
+import { Entity, Relation, KnowledgeGraph } from './types.js';
+import {
+  validateCreateEntitiesRequest,
+  validateCreateRelationsRequest,
+  validateAddObservationsRequest,
+  validateDeleteEntitiesRequest,
+  validateDeleteObservationsRequest,
+  validateDeleteRelationsRequest,
+  validateSearchSimilarRequest,
+} from './validation.js';
 
-
-// Define the path to the JSONL file, you can change this to your desired local path
+// Define paths
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_FILE_PATH = path.join(__dirname, 'memory.json');
 
-// We are storing our memory using entities, relations, and observations in a graph structure
-interface Entity {
-  name: string;
-  entityType: string;
-  observations: string[];
-}
-
-interface Relation {
-  from: string;
-  to: string;
-  relationType: string;
-}
-
-interface KnowledgeGraph {
-  entities: Entity[];
-  relations: Relation[];
-}
-
-// The KnowledgeGraphManager class contains all operations to interact with the knowledge graph
 class KnowledgeGraphManager {
-  private async loadGraph(): Promise<KnowledgeGraph> {
+  private graph: KnowledgeGraph;
+  private qdrant: QdrantPersistence;
+
+  constructor() {
+    this.graph = { entities: [], relations: [] };
+    this.qdrant = new QdrantPersistence();
+  }
+
+  async initialize(): Promise<void> {
     try {
-      const data = await fs.readFile(MEMORY_FILE_PATH, "utf-8");
-      const lines = data.split("\n").filter(line => line.trim() !== "");
-      return lines.reduce((graph: KnowledgeGraph, line) => {
-        const item = JSON.parse(line);
-        if (item.type === "entity") graph.entities.push(item as Entity);
-        if (item.type === "relation") graph.relations.push(item as Relation);
-        return graph;
-      }, { entities: [], relations: [] });
-    } catch (error) {
-      if (error instanceof Error && 'code' in error && (error as any).code === "ENOENT") {
-        return { entities: [], relations: [] };
-      }
-      throw error;
+      const data = await fs.readFile(MEMORY_FILE_PATH, 'utf-8');
+      this.graph = JSON.parse(data);
+    } catch {
+      // If file doesn't exist, use empty graph
+      this.graph = { entities: [], relations: [] };
     }
+    await this.qdrant.initialize();
   }
 
-  private async saveGraph(graph: KnowledgeGraph): Promise<void> {
-    const lines = [
-      ...graph.entities.map(e => JSON.stringify({ type: "entity", ...e })),
-      ...graph.relations.map(r => JSON.stringify({ type: "relation", ...r })),
-    ];
-    await fs.writeFile(MEMORY_FILE_PATH, lines.join("\n"));
+  async save(): Promise<void> {
+    await fs.writeFile(MEMORY_FILE_PATH, JSON.stringify(this.graph, null, 2));
   }
 
-  async createEntities(entities: Entity[]): Promise<Entity[]> {
-    const graph = await this.loadGraph();
-    const newEntities = entities.filter(e => !graph.entities.some(existingEntity => existingEntity.name === e.name));
-    graph.entities.push(...newEntities);
-    await this.saveGraph(graph);
-    return newEntities;
-  }
-
-  async createRelations(relations: Relation[]): Promise<Relation[]> {
-    const graph = await this.loadGraph();
-    const newRelations = relations.filter(r => !graph.relations.some(existingRelation => 
-      existingRelation.from === r.from && 
-      existingRelation.to === r.to && 
-      existingRelation.relationType === r.relationType
-    ));
-    graph.relations.push(...newRelations);
-    await this.saveGraph(graph);
-    return newRelations;
-  }
-
-  async addObservations(observations: { entityName: string; contents: string[] }[]): Promise<{ entityName: string; addedObservations: string[] }[]> {
-    const graph = await this.loadGraph();
-    const results = observations.map(o => {
-      const entity = graph.entities.find(e => e.name === o.entityName);
-      if (!entity) {
-        throw new Error(`Entity with name ${o.entityName} not found`);
+  async addEntities(entities: Entity[]): Promise<void> {
+    for (const entity of entities) {
+      const existingIndex = this.graph.entities.findIndex(e => e.name === entity.name);
+      if (existingIndex !== -1) {
+        this.graph.entities[existingIndex] = entity;
+      } else {
+        this.graph.entities.push(entity);
       }
-      const newObservations = o.contents.filter(content => !entity.observations.includes(content));
-      entity.observations.push(...newObservations);
-      return { entityName: o.entityName, addedObservations: newObservations };
-    });
-    await this.saveGraph(graph);
-    return results;
+      await this.qdrant.persistEntity(entity);
+    }
+    await this.save();
+  }
+
+  async addRelations(relations: Relation[]): Promise<void> {
+    for (const relation of relations) {
+      if (!this.graph.entities.some(e => e.name === relation.from)) {
+        throw new Error(`Entity not found: ${relation.from}`);
+      }
+      if (!this.graph.entities.some(e => e.name === relation.to)) {
+        throw new Error(`Entity not found: ${relation.to}`);
+      }
+      const existingIndex = this.graph.relations.findIndex(
+        r => r.from === relation.from && r.to === relation.to && r.relationType === relation.relationType
+      );
+      if (existingIndex !== -1) {
+        this.graph.relations[existingIndex] = relation;
+      } else {
+        this.graph.relations.push(relation);
+      }
+      await this.qdrant.persistRelation(relation);
+    }
+    await this.save();
+  }
+
+  async addObservations(entityName: string, observations: string[]): Promise<void> {
+    const entity = this.graph.entities.find(e => e.name === entityName);
+    if (!entity) {
+      throw new Error(`Entity not found: ${entityName}`);
+    }
+    entity.observations.push(...observations);
+    await this.qdrant.persistEntity(entity);
+    await this.save();
   }
 
   async deleteEntities(entityNames: string[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.entities = graph.entities.filter(e => !entityNames.includes(e.name));
-    graph.relations = graph.relations.filter(r => !entityNames.includes(r.from) && !entityNames.includes(r.to));
-    await this.saveGraph(graph);
+    for (const name of entityNames) {
+      const index = this.graph.entities.findIndex(e => e.name === name);
+      if (index !== -1) {
+        this.graph.entities.splice(index, 1);
+        this.graph.relations = this.graph.relations.filter(
+          r => r.from !== name && r.to !== name
+        );
+        await this.qdrant.deleteEntity(name);
+      }
+    }
+    await this.save();
   }
 
-  async deleteObservations(deletions: { entityName: string; observations: string[] }[]): Promise<void> {
-    const graph = await this.loadGraph();
-    deletions.forEach(d => {
-      const entity = graph.entities.find(e => e.name === d.entityName);
-      if (entity) {
-        entity.observations = entity.observations.filter(o => !d.observations.includes(o));
-      }
-    });
-    await this.saveGraph(graph);
+  async deleteObservations(entityName: string, observations: string[]): Promise<void> {
+    const entity = this.graph.entities.find(e => e.name === entityName);
+    if (!entity) {
+      throw new Error(`Entity not found: ${entityName}`);
+    }
+    entity.observations = entity.observations.filter(o => !observations.includes(o));
+    await this.qdrant.persistEntity(entity);
+    await this.save();
   }
 
   async deleteRelations(relations: Relation[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.relations = graph.relations.filter(r => !relations.some(delRelation => 
-      r.from === delRelation.from && 
-      r.to === delRelation.to && 
-      r.relationType === delRelation.relationType
-    ));
-    await this.saveGraph(graph);
+    for (const relation of relations) {
+      const index = this.graph.relations.findIndex(
+        r => r.from === relation.from && r.to === relation.to && r.relationType === relation.relationType
+      );
+      if (index !== -1) {
+        this.graph.relations.splice(index, 1);
+        await this.qdrant.deleteRelation(relation);
+      }
+    }
+    await this.save();
   }
 
-  async readGraph(): Promise<KnowledgeGraph> {
-    return this.loadGraph();
+  getGraph(): KnowledgeGraph {
+    return this.graph;
   }
 
-  // Very basic search function
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    
-    // Filter entities
-    const filteredEntities = graph.entities.filter(e => 
-      e.name.toLowerCase().includes(query.toLowerCase()) ||
-      e.entityType.toLowerCase().includes(query.toLowerCase()) ||
-      e.observations.some(o => o.toLowerCase().includes(query.toLowerCase()))
-    );
-  
-    // Create a Set of filtered entity names for quick lookup
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-  
-    // Filter relations to only include those between filtered entities
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-  
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-  
-    return filteredGraph;
-  }
-
-  async openNodes(names: string[]): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    
-    // Filter entities
-    const filteredEntities = graph.entities.filter(e => names.includes(e.name));
-  
-    // Create a Set of filtered entity names for quick lookup
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-  
-    // Filter relations to only include those between filtered entities
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-  
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-  
-    return filteredGraph;
+  async searchSimilar(query: string, limit: number = 10): Promise<Array<Entity | Relation>> {
+    return await this.qdrant.searchSimilar(query, limit);
   }
 }
 
-const knowledgeGraphManager = new KnowledgeGraphManager();
+class MemoryServer {
+  private server: Server;
+  private graphManager: KnowledgeGraphManager;
 
+  constructor() {
+    this.server = new Server(
+      {
+        name: "memory",
+        version: "0.6.2",
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
 
-// The server instance and tools exposed to Claude
-const server = new Server({
-  name: "memory-server",
-  version: "1.0.0",
-},    {
-    capabilities: {
-      tools: {},
-    },
-  },);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "create_entities",
-        description: "Create multiple new entities in the knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {
-            entities: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  name: { type: "string", description: "The name of the entity" },
-                  entityType: { type: "string", description: "The type of the entity" },
-                  observations: { 
-                    type: "array", 
-                    items: { type: "string" },
-                    description: "An array of observation contents associated with the entity"
-                  },
-                },
-                required: ["name", "entityType", "observations"],
-              },
-            },
-          },
-          required: ["entities"],
-        },
-      },
-      {
-        name: "create_relations",
-        description: "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice",
-        inputSchema: {
-          type: "object",
-          properties: {
-            relations: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  from: { type: "string", description: "The name of the entity where the relation starts" },
-                  to: { type: "string", description: "The name of the entity where the relation ends" },
-                  relationType: { type: "string", description: "The type of the relation" },
-                },
-                required: ["from", "to", "relationType"],
-              },
-            },
-          },
-          required: ["relations"],
-        },
-      },
-      {
-        name: "add_observations",
-        description: "Add new observations to existing entities in the knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {
-            observations: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  entityName: { type: "string", description: "The name of the entity to add the observations to" },
-                  contents: { 
-                    type: "array", 
-                    items: { type: "string" },
-                    description: "An array of observation contents to add"
-                  },
-                },
-                required: ["entityName", "contents"],
-              },
-            },
-          },
-          required: ["observations"],
-        },
-      },
-      {
-        name: "delete_entities",
-        description: "Delete multiple entities and their associated relations from the knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {
-            entityNames: { 
-              type: "array", 
-              items: { type: "string" },
-              description: "An array of entity names to delete" 
-            },
-          },
-          required: ["entityNames"],
-        },
-      },
-      {
-        name: "delete_observations",
-        description: "Delete specific observations from entities in the knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {
-            deletions: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  entityName: { type: "string", description: "The name of the entity containing the observations" },
-                  observations: { 
-                    type: "array", 
-                    items: { type: "string" },
-                    description: "An array of observations to delete"
-                  },
-                },
-                required: ["entityName", "observations"],
-              },
-            },
-          },
-          required: ["deletions"],
-        },
-      },
-      {
-        name: "delete_relations",
-        description: "Delete multiple relations from the knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {
-            relations: { 
-              type: "array", 
-              items: {
-                type: "object",
-                properties: {
-                  from: { type: "string", description: "The name of the entity where the relation starts" },
-                  to: { type: "string", description: "The name of the entity where the relation ends" },
-                  relationType: { type: "string", description: "The type of the relation" },
-                },
-                required: ["from", "to", "relationType"],
-              },
-              description: "An array of relations to delete" 
-            },
-          },
-          required: ["relations"],
-        },
-      },
-      {
-        name: "read_graph",
-        description: "Read the entire knowledge graph",
-        inputSchema: {
-          type: "object",
-          properties: {},
-        },
-      },
-      {
-        name: "search_nodes",
-        description: "Search for nodes in the knowledge graph based on a query",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "The search query to match against entity names, types, and observation content" },
-          },
-          required: ["query"],
-        },
-      },
-      {
-        name: "open_nodes",
-        description: "Open specific nodes in the knowledge graph by their names",
-        inputSchema: {
-          type: "object",
-          properties: {
-            names: {
-              type: "array",
-              items: { type: "string" },
-              description: "An array of entity names to retrieve",
-            },
-          },
-          required: ["names"],
-        },
-      },
-    ],
-  };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  if (!args) {
-    throw new Error(`No arguments provided for tool: ${name}`);
+    this.graphManager = new KnowledgeGraphManager();
+    this.setupToolHandlers();
   }
 
-  switch (name) {
-    case "create_entities":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createEntities(args.entities as Entity[]), null, 2) }] };
-    case "create_relations":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createRelations(args.relations as Relation[]), null, 2) }] };
-    case "add_observations":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.addObservations(args.observations as { entityName: string; contents: string[] }[]), null, 2) }] };
-    case "delete_entities":
-      await knowledgeGraphManager.deleteEntities(args.entityNames as string[]);
-      return { content: [{ type: "text", text: "Entities deleted successfully" }] };
-    case "delete_observations":
-      await knowledgeGraphManager.deleteObservations(args.deletions as { entityName: string; observations: string[] }[]);
-      return { content: [{ type: "text", text: "Observations deleted successfully" }] };
-    case "delete_relations":
-      await knowledgeGraphManager.deleteRelations(args.relations as Relation[]);
-      return { content: [{ type: "text", text: "Relations deleted successfully" }] };
-    case "read_graph":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.readGraph(), null, 2) }] };
-    case "search_nodes":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchNodes(args.query as string), null, 2) }] };
-    case "open_nodes":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.openNodes(args.names as string[]), null, 2) }] };
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
-});
+  private setupToolHandlers() {
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [
+        {
+          name: "create_entities",
+          description: "Create multiple new entities in the knowledge graph",
+          inputSchema: {
+            type: "object",
+            properties: {
+              entities: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    entityType: { type: "string" },
+                    observations: {
+                      type: "array",
+                      items: { type: "string" }
+                    }
+                  },
+                  required: ["name", "entityType", "observations"]
+                }
+              }
+            },
+            required: ["entities"]
+          }
+        },
+        {
+          name: "create_relations",
+          description: "Create multiple new relations between entities",
+          inputSchema: {
+            type: "object",
+            properties: {
+              relations: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    from: { type: "string" },
+                    to: { type: "string" },
+                    relationType: { type: "string" }
+                  },
+                  required: ["from", "to", "relationType"]
+                }
+              }
+            },
+            required: ["relations"]
+          }
+        },
+        {
+          name: "add_observations",
+          description: "Add new observations to existing entities",
+          inputSchema: {
+            type: "object",
+            properties: {
+              observations: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    entityName: { type: "string" },
+                    contents: {
+                      type: "array",
+                      items: { type: "string" }
+                    }
+                  },
+                  required: ["entityName", "contents"]
+                }
+              }
+            },
+            required: ["observations"]
+          }
+        },
+        {
+          name: "delete_entities",
+          description: "Delete multiple entities and their relations",
+          inputSchema: {
+            type: "object",
+            properties: {
+              entityNames: {
+                type: "array",
+                items: { type: "string" }
+              }
+            },
+            required: ["entityNames"]
+          }
+        },
+        {
+          name: "delete_observations",
+          description: "Delete specific observations from entities",
+          inputSchema: {
+            type: "object",
+            properties: {
+              deletions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    entityName: { type: "string" },
+                    observations: {
+                      type: "array",
+                      items: { type: "string" }
+                    }
+                  },
+                  required: ["entityName", "observations"]
+                }
+              }
+            },
+            required: ["deletions"]
+          }
+        },
+        {
+          name: "delete_relations",
+          description: "Delete multiple relations",
+          inputSchema: {
+            type: "object",
+            properties: {
+              relations: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    from: { type: "string" },
+                    to: { type: "string" },
+                    relationType: { type: "string" }
+                  },
+                  required: ["from", "to", "relationType"]
+                }
+              }
+            },
+            required: ["relations"]
+          }
+        },
+        {
+          name: "read_graph",
+          description: "Read the entire knowledge graph",
+          inputSchema: {
+            type: "object",
+            properties: {}
+          }
+        },
+        {
+          name: "search_similar",
+          description: "Search for similar entities and relations using semantic search",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              limit: { 
+                type: "number",
+                default: 10
+              }
+            },
+            required: ["query"]
+          }
+        }
+      ],
+    }));
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Knowledge Graph MCP Server running on stdio");
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      if (!request.params.arguments) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Missing arguments"
+        );
+      }
+
+      try {
+        switch (request.params.name) {
+          case "create_entities": {
+            const args = validateCreateEntitiesRequest(request.params.arguments);
+            await this.graphManager.addEntities(args.entities);
+            return {
+              content: [{ type: "text", text: "Entities created successfully" }],
+            };
+          }
+
+          case "create_relations": {
+            const args = validateCreateRelationsRequest(request.params.arguments);
+            await this.graphManager.addRelations(args.relations);
+            return {
+              content: [{ type: "text", text: "Relations created successfully" }],
+            };
+          }
+
+          case "add_observations": {
+            const args = validateAddObservationsRequest(request.params.arguments);
+            for (const obs of args.observations) {
+              await this.graphManager.addObservations(obs.entityName, obs.contents);
+            }
+            return {
+              content: [{ type: "text", text: "Observations added successfully" }],
+            };
+          }
+
+          case "delete_entities": {
+            const args = validateDeleteEntitiesRequest(request.params.arguments);
+            await this.graphManager.deleteEntities(args.entityNames);
+            return {
+              content: [{ type: "text", text: "Entities deleted successfully" }],
+            };
+          }
+
+          case "delete_observations": {
+            const args = validateDeleteObservationsRequest(request.params.arguments);
+            for (const del of args.deletions) {
+              await this.graphManager.deleteObservations(del.entityName, del.observations);
+            }
+            return {
+              content: [{ type: "text", text: "Observations deleted successfully" }],
+            };
+          }
+
+          case "delete_relations": {
+            const args = validateDeleteRelationsRequest(request.params.arguments);
+            await this.graphManager.deleteRelations(args.relations);
+            return {
+              content: [{ type: "text", text: "Relations deleted successfully" }],
+            };
+          }
+
+          case "read_graph":
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(this.graphManager.getGraph(), null, 2),
+                },
+              ],
+            };
+
+          case "search_similar": {
+            const args = validateSearchSimilarRequest(request.params.arguments);
+            const results = await this.graphManager.searchSimilar(
+              args.query,
+              args.limit
+            );
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(results, null, 2),
+                },
+              ],
+            };
+          }
+
+          default:
+            throw new McpError(
+              ErrorCode.MethodNotFound,
+              `Unknown tool: ${request.params.name}`
+            );
+        }
+      } catch (error) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    });
+  }
+
+  async run() {
+    await this.graphManager.initialize();
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+    console.error("Memory MCP server running on stdio");
+  }
 }
 
-main().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1);
-});
+const server = new MemoryServer();
+server.run().catch(console.error);
