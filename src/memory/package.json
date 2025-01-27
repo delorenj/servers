@@ -1,11 +1,11 @@
 {
-  "name": "@modelcontextprotocol/server-memory",
+  "name": "@cline/mcp-memory",
   "version": "0.6.2",
-  "description": "MCP server for enabling memory for Claude through a knowledge graph with Qdrant persistence",
+  "description": "MCP server for enabling memory for Claude through a knowledge graph with Qdrant persistence - Fork with HTTPS support",
   "license": "MIT",
-  "author": "Anthropic, PBC (https://anthropic.com)",
-  "homepage": "https://modelcontextprotocol.io",
-  "bugs": "https://github.com/modelcontextprotocol/servers/issues",
+  "author": "Jarad DeLorenzo",
+  "homepage": "https://github.com/yourusername/servers",
+  "bugs": "https://github.com/yourusername/servers/issues",
   "type": "module",
   "bin": {
     "mcp-server-memory": "dist/index.js"
@@ -27,5 +27,8 @@
     "@types/node": "^22",
     "shx": "^0.3.4",
     "typescript": "^5.6.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
