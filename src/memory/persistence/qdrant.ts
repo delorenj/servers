@@ -44,8 +44,9 @@ export class QdrantPersistence {
     
     this.client = new QdrantClient({ 
       url: QDRANT_URL,
-      timeout: 10000, // 10 second timeout
-      apiKey: QDRANT_API_KEY // Optional API key for authentication
+      timeout: 60000, // 60 second timeout
+      apiKey: QDRANT_API_KEY, // Optional API key for authentication
+      checkCompatibility: false // Disable version compatibility check
     });
 
     this.openai = new OpenAI({
